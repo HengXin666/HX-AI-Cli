@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.python-version
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments and dependency caches
+.venv/
+venv/
+env/
+.uv/
+uv.lock
+
+# HX-AI-Cli generated workspace files
+.ai-cli/
+.ai-worktrees/
+aiw-config.json
+
+# Local editor and OS files
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Local agent/session metadata
+.agents/
+.codex/
