@@ -105,6 +105,20 @@ MESSAGES: dict[str, dict[str, str]] = {
         "restart_task": "Restart task",
         "attach_shell": "Open its shell",
         "delete_task": "Delete task and cleanup",
+        "finalize_task": "AI CLI exited. What do you want to do with this task?",
+        "finalize_apply": "Apply worktree to the main workspace",
+        "finalize_keep": "Keep task and worktree for later",
+        "finalize_delete": "Discard task and cleanup worktree",
+        "finalize_shell": "Open a shell in the worktree",
+        "finalize_no_worktree": "Task exited. No worktree cleanup is needed.",
+        "finalize_kept": "Kept task '{name}'. You can continue it from HX-AI-Cli later.",
+        "finalize_workspace_dirty": "Main workspace has uncommitted changes. Commit or stash them before merging this worktree.",
+        "finalize_committed": "Committed worktree changes on {branch}.",
+        "finalize_no_changes": "No uncommitted changes in worktree.",
+        "finalize_merged": "Merged {branch} into the main workspace.",
+        "finalize_apply_failed": "Could not apply worktree automatically: {detail}",
+        "finalize_instructions": "Manual git workflow:",
+        "finalize_status": "AI CLI exited with status {status}.",
         "clear_tasks_confirm": "Delete all saved tasks for this workspace and cleanup worktrees?",
         "delete_task_confirm": "Delete saved task '{name}'?",
         "cleanup_worktree_confirm": "Remove worktree {cwd} and branch {branch}?",
@@ -224,6 +238,20 @@ MESSAGES: dict[str, dict[str, str]] = {
         "restart_task": "重启任务",
         "attach_shell": "进入它的 shell",
         "delete_task": "删除任务并清理",
+        "finalize_task": "AI CLI 已退出。你想怎么处理这个任务？",
+        "finalize_apply": "把 worktree 应用到主工作区",
+        "finalize_keep": "保留任务和 worktree，稍后继续",
+        "finalize_delete": "丢弃任务并清理 worktree",
+        "finalize_shell": "进入 worktree 的 shell",
+        "finalize_no_worktree": "任务已退出。这个任务没有 worktree 需要清理。",
+        "finalize_kept": "已保留任务“{name}”。之后可以从 HX-AI-Cli 继续。",
+        "finalize_workspace_dirty": "主工作区有未提交改动。请先提交或 stash，再合并这个 worktree。",
+        "finalize_committed": "已在 {branch} 提交 worktree 改动。",
+        "finalize_no_changes": "worktree 中没有未提交改动。",
+        "finalize_merged": "已将 {branch} 合并到主工作区。",
+        "finalize_apply_failed": "无法自动应用 worktree：{detail}",
+        "finalize_instructions": "手动 git 流程：",
+        "finalize_status": "AI CLI 退出码：{status}。",
         "clear_tasks_confirm": "删除当前工作区的全部任务记录并清理 worktree？",
         "delete_task_confirm": "删除已保存任务“{name}”？",
         "cleanup_worktree_confirm": "删除 worktree {cwd} 和分支 {branch}？",
@@ -820,14 +848,18 @@ def tmux_has_session(config: dict[str, Any], name: str) -> bool:
     return proc.returncode == 0
 
 
-def tmux_apply_defaults(config: dict[str, Any], name: str) -> None:
+def tmux_apply_defaults(config: dict[str, Any], name: str, title: str | None = None) -> None:
     tmux = multiplexer_command(config)
     for args in (
         ["set-option", "-t", name, "mouse", "on"],
         ["set-option", "-t", name, "set-clipboard", "on"],
+        ["set-option", "-t", name, "set-titles", "on"],
+        ["set-option", "-t", name, "set-titles-string", "#{pane_title}"],
         ["set-window-option", "-t", name, "mode-keys", "vi"],
     ):
         run_capture([tmux, *args])
+    if title:
+        run_capture([tmux, "select-pane", "-t", name, "-T", clean_terminal_title(title)])
 
 
 def tmux_current_command(config: dict[str, Any], name: str) -> str | None:
@@ -887,19 +919,43 @@ def show_session_status(config: dict[str, Any], sessions: list[dict[str, Any]]) 
     console.print(table)
 
 
-def tmux_attach_or_create(config: dict[str, Any], name: str, cwd: Path, command: list[str]) -> int:
-    tmux = multiplexer_command(config)
-    if tmux_has_session(config, name):
-        tmux_apply_defaults(config, name)
-        return subprocess.call([tmux, "attach-session", "-t", name])
+def finalize_command_text(record_id: str) -> str:
+    script = entry_script_path()
+    command = [sys.executable, str(script), "finalize-task", "--id", record_id, "--status"]
+    return " ".join(shell_quote(part) for part in command)
+
+
+def task_command_text(config: dict[str, Any], command: list[str], record_id: str | None = None) -> str:
     command_text = subprocess.list2cmdline(command) if platform_id() == "windows" else " ".join(shell_quote(part) for part in command)
     shell = config.get("shell") or default_shell()
-    if platform_id() != "windows" and Path(shell).name in SHELL_COMMANDS:
-        command_text = shell_fallback_command(command_text, shell, "AI command")
+    shell_name = Path(shell).name
+    if record_id and platform_id() != "windows":
+        if shell_name == "fish":
+            command_text = f"{command_text}; set aiw_status $status; {finalize_command_text(record_id)} $aiw_status"
+        else:
+            command_text = f"{command_text}; aiw_status=$?; {finalize_command_text(record_id)} \"$aiw_status\""
+    if platform_id() != "windows" and shell_name in SHELL_COMMANDS:
+        return shell_fallback_command(command_text, shell, "AI command", fallback=record_id is None)
+    return command_text
+
+
+def tmux_attach_or_create(
+    config: dict[str, Any],
+    name: str,
+    cwd: Path,
+    command: list[str],
+    title: str | None = None,
+    record_id: str | None = None,
+) -> int:
+    tmux = multiplexer_command(config)
+    if tmux_has_session(config, name):
+        tmux_apply_defaults(config, name, title=title)
+        return subprocess.call([tmux, "attach-session", "-t", name])
+    command_text = task_command_text(config, command, record_id=record_id)
     created = subprocess.call([tmux, "new-session", "-d", "-s", name, "-c", str(cwd), command_text])
     if created != 0:
         return created
-    tmux_apply_defaults(config, name)
+    tmux_apply_defaults(config, name, title=title)
     return subprocess.call([tmux, "attach-session", "-t", name])
 
 
@@ -915,7 +971,11 @@ def clean_terminal_title(value: str, default: str = DEFAULT_VSCODE_PROFILE_NAME)
 
 
 def task_terminal_title(task_name: str) -> str:
-    return f"HX[{clean_terminal_title(task_name, 'task')}]"
+    return f"[HX] {clean_terminal_title(task_name, 'task')}"
+
+
+def working_task_terminal_title(task_name: str) -> str:
+    return f"*{task_terminal_title(task_name)}"
 
 
 def set_terminal_title(title: str) -> None:
@@ -925,11 +985,17 @@ def set_terminal_title(title: str) -> None:
     sys.stdout.flush()
 
 
-def shell_fallback_command(command: str, shell: str, label: str, reset_title: bool = False) -> str:
+def set_task_title(task_name: str, working: bool) -> None:
+    set_terminal_title(working_task_terminal_title(task_name) if working else task_terminal_title(task_name))
+
+
+def shell_fallback_command(command: str, shell: str, label: str, reset_title: bool = False, fallback: bool = True) -> str:
     quoted_shell = shell_quote(shell)
     quoted_label = shell_quote(label)
     title_command = f"printf '\\033]0;%s\\007' {quoted_label}; " if reset_title else ""
     shell_name = Path(shell).name
+    if not fallback:
+        return command
     if shell_name == "fish":
         return (
             f"{command}; "
@@ -947,13 +1013,18 @@ def shell_fallback_command(command: str, shell: str, label: str, reset_title: bo
     )
 
 
-def launch_direct(cwd: Path, command: list[str]) -> int:
+def launch_direct(cwd: Path, command: list[str], task_name: str | None = None, record_id: str | None = None) -> int:
     print_line(tr(load_config(), "starting", cwd=cwd))
+    if task_name:
+        set_task_title(task_name, working=False)
     try:
-        return subprocess.call(command, cwd=str(cwd))
+        status = subprocess.call(command, cwd=str(cwd))
     except FileNotFoundError:
         print_error(tr(load_config(), "command_not_found", command=command[0]))
         return 127
+    if record_id:
+        return finalize_task(record_id, status)
+    return status
 
 
 def add_session_record(record: dict[str, Any]) -> None:
@@ -975,6 +1046,77 @@ def same_workspace(record: dict[str, Any], workspace: Path) -> bool:
 
 def workspace_sessions(workspace: Path) -> list[dict[str, Any]]:
     return [item for item in load_sessions() if same_workspace(item, workspace)]
+
+
+def find_session(record_id: str) -> dict[str, Any] | None:
+    for record in load_sessions():
+        if record.get("id") == record_id:
+            return record
+    return None
+
+
+def git_has_changes(path: Path) -> bool:
+    proc = run_capture(["git", "status", "--porcelain"], path)
+    return bool(proc.stdout.strip()) if proc.returncode == 0 else False
+
+
+def print_worktree_instructions(config: dict[str, Any], record: dict[str, Any]) -> None:
+    workspace = Path(str(record.get("workspace", "."))).expanduser()
+    cwd = Path(str(record.get("cwd", "."))).expanduser()
+    branch = str(record.get("branch") or "")
+    print_info(tr(config, "finalize_instructions"))
+    for line in (
+        f"cd {shell_quote(str(cwd))}",
+        "git status",
+        "git add -A",
+        "git commit -m 'Apply AI task changes'",
+        f"cd {shell_quote(str(workspace))}",
+        f"git merge --no-ff {shell_quote(branch)}" if branch else "# merge the task branch into your workspace branch",
+        f"git worktree remove {shell_quote(str(cwd))}",
+        f"git branch -d {shell_quote(branch)}" if branch else "# delete the task branch when done",
+    ):
+        print_line(f"  {line}")
+
+
+def apply_worktree_for_record(config: dict[str, Any], record: dict[str, Any]) -> bool:
+    if record.get("mode") != "worktree":
+        print_info(tr(config, "finalize_no_worktree"))
+        remove_session_record(record)
+        return True
+    cwd = Path(str(record.get("cwd", "."))).expanduser()
+    workspace = Path(str(record.get("workspace", "."))).expanduser()
+    branch = str(record.get("branch") or "")
+    if not branch:
+        print_error(tr(config, "finalize_apply_failed", detail="missing branch"))
+        print_worktree_instructions(config, record)
+        return False
+    if git_has_changes(workspace):
+        print_error(tr(config, "finalize_workspace_dirty"))
+        print_worktree_instructions(config, record)
+        return False
+    if git_has_changes(cwd):
+        proc = run_capture(["git", "add", "-A"], cwd)
+        if proc.returncode != 0:
+            print_error(tr(config, "finalize_apply_failed", detail=(proc.stderr or proc.stdout).strip()))
+            print_worktree_instructions(config, record)
+            return False
+        proc = run_capture(["git", "commit", "-m", f"Apply AI task: {record.get('name', record.get('id', 'task'))}"], cwd)
+        if proc.returncode != 0:
+            print_error(tr(config, "finalize_apply_failed", detail=(proc.stderr or proc.stdout).strip()))
+            print_worktree_instructions(config, record)
+            return False
+        print_success(tr(config, "finalize_committed", branch=branch))
+    else:
+        print_info(tr(config, "finalize_no_changes"))
+    proc = run_capture(["git", "merge", "--no-ff", branch], workspace)
+    if proc.returncode != 0:
+        print_error(tr(config, "finalize_apply_failed", detail=(proc.stderr or proc.stdout).strip()))
+        print_worktree_instructions(config, record)
+        return False
+    print_success(tr(config, "finalize_merged", branch=branch))
+    remove_worktree_for_record(config, record, confirm=False)
+    remove_session_record(record)
+    return True
 
 
 def remove_worktree_for_record(config: dict[str, Any], record: dict[str, Any], confirm: bool = True) -> None:
@@ -1032,6 +1174,50 @@ def clear_workspace_tasks(config: dict[str, Any], workspace: Path) -> None:
     print_success(tr(config, "cleared_tasks", count=len(sessions)))
 
 
+def open_shell(path: Path) -> int:
+    shell = default_shell()
+    if platform_id() == "windows":
+        return subprocess.call([shell], cwd=str(path))
+    if Path(shell).name in SHELL_COMMANDS:
+        return subprocess.call([shell, "-l"], cwd=str(path))
+    return subprocess.call([shell], cwd=str(path))
+
+
+def finalize_task(record_id: str, status: int) -> int:
+    config = ensure_language(load_config())
+    record = find_session(record_id)
+    print_line()
+    print_info(tr(config, "finalize_status", status=status))
+    if not record:
+        return status
+    if record.get("mode") != "worktree":
+        print_info(tr(config, "finalize_no_worktree"))
+        remove_session_record(record)
+        return status
+    print_worktree_instructions(config, record)
+    action = ask_select(
+        tr(config, "finalize_task"),
+        [
+            questionary.Choice(title=tr(config, "finalize_apply"), value="apply"),
+            questionary.Choice(title=tr(config, "finalize_keep"), value="keep"),
+            questionary.Choice(title=tr(config, "finalize_shell"), value="shell"),
+            questionary.Choice(title=tr(config, "finalize_delete"), value="delete"),
+        ],
+    )
+    if action == "apply":
+        apply_worktree_for_record(config, record)
+        return status
+    if action == "delete":
+        remove_worktree_for_record(config, record, confirm=True)
+        remove_session_record(record)
+        print_success(tr(config, "deleted_task", name=record.get("name", record_id)))
+        return status
+    if action == "shell":
+        return open_shell(Path(str(record.get("cwd", "."))).expanduser())
+    print_success(tr(config, "finalize_kept", name=record.get("name", record_id)))
+    return status
+
+
 def choose_existing_session(config: dict[str, Any], workspace: Path | None = None) -> dict[str, Any] | None:
     sessions = workspace_sessions(workspace) if workspace else load_sessions()
     if not sessions:
@@ -1053,6 +1239,7 @@ def start_existing(config: dict[str, Any], workspace: Path | None = None) -> int
     if not isinstance(record, dict):
         return None
     command = resolve_command_executable(record.get("command", []), config.get("shell") or default_shell())
+    task_name = str(record.get("name") or record.get("id") or "task")
     cwd = Path(record.get("cwd", ".")).expanduser()
     name = record.get("session") or session_name(config, record.get("id", "task"))
     if tmux_available(config):
@@ -1083,13 +1270,13 @@ def start_existing(config: dict[str, Any], workspace: Path | None = None) -> int
         if action == "delete":
             delete_task_record(config, record)
             return None
-        set_terminal_title(task_terminal_title(str(record.get("name", name))))
+        set_task_title(task_name, working=False)
         if action == "restart" and has_session:
             subprocess.call([multiplexer_command(config), "kill-session", "-t", name])
-        return tmux_attach_or_create(config, name, cwd, command)
-    set_terminal_title(task_terminal_title(str(record.get("name", name))))
+        return tmux_attach_or_create(config, name, cwd, command, title=task_terminal_title(task_name), record_id=str(record.get("id", "")))
+    set_task_title(task_name, working=False)
     print_error(tr(config, "mux_missing_continue", mux=multiplexer_command(config)))
-    return launch_direct(cwd, command)
+    return launch_direct(cwd, command, task_name=task_name, record_id=str(record.get("id", "")))
 
 
 def start_new(config: dict[str, Any], workspace: Path) -> int:
@@ -1112,7 +1299,7 @@ def start_new(config: dict[str, Any], workspace: Path) -> int:
         return 1
 
     task_name = ask_text(tr(config, "task_name"), default=f"task-{now_stamp()}")
-    set_terminal_title(task_terminal_title(task_name))
+    set_task_title(task_name, working=False)
     use_worktree = False
     repo = git_root(workspace)
     if repo or command_exists("git"):
@@ -1152,9 +1339,9 @@ def start_new(config: dict[str, Any], workspace: Path) -> int:
     add_session_record(record)
 
     if tmux_available(config):
-        return tmux_attach_or_create(config, session, cwd, command)
+        return tmux_attach_or_create(config, session, cwd, command, title=task_terminal_title(task_name), record_id=task_id)
     print_error(tr(config, "mux_missing_new", mux=multiplexer_command(config)))
-    return launch_direct(cwd, command)
+    return launch_direct(cwd, command, task_name=task_name, record_id=task_id)
 
 
 def ensure_workspace_script(workspace: Path) -> Path:
@@ -1585,7 +1772,7 @@ def vscode_profile(script: Path, config: dict[str, Any], profile_name: str) -> d
             "path": shell,
             "args": ["-NoExit", "-ExecutionPolicy", "Bypass", "-Command", command],
             "icon": "terminal-powershell",
-            "overrideName": True,
+            "overrideName": False,
         }
 
     shell = config.get("shell") or default_shell()
@@ -1595,9 +1782,9 @@ def vscode_profile(script: Path, config: dict[str, Any], profile_name: str) -> d
             "path": shell,
             "args": ["-lc", vscode_shell_fallback_command(command, shell, profile_name)],
             "icon": "terminal-bash",
-            "overrideName": True,
+            "overrideName": False,
         }
-    return {"path": shell, "args": ["-c", command], "icon": "terminal", "overrideName": True}
+    return {"path": shell, "args": ["-c", command], "icon": "terminal", "overrideName": False}
 
 
 def is_aiw_vscode_profile(profile: Any) -> bool:
@@ -1640,6 +1827,7 @@ def configure_vscode(workspace: Path, set_default: bool | None, scope: str = "us
         if settings.get(default_key) == legacy_name:
             settings.pop(default_key, None)
     profiles[profile_name] = vscode_profile(script, config, profile_name)
+    settings["terminal.integrated.tabs.title"] = "${sequence}"
     if set_default is True:
         settings[default_key] = profile_name
     elif set_default is False and settings.get(default_key) == profile_name:
@@ -1661,6 +1849,13 @@ def import_config(source: Path) -> None:
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
+    if argv and argv[0] == "finalize-task":
+        parser = argparse.ArgumentParser(description=argparse.SUPPRESS)
+        parser.add_argument("command")
+        parser.add_argument("--id", required=True)
+        parser.add_argument("--status", type=int, default=0)
+        return parser.parse_args(argv)
+
     parser = argparse.ArgumentParser(description=APP_TITLE)
     sub = parser.add_subparsers(dest="command")
 
@@ -1694,6 +1889,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command in (None, "launch"):
             workspace = Path(getattr(args, "workspace", os.getcwd())).expanduser()
             return launch_interactive(workspace)
+        if args.command == "finalize-task":
+            return finalize_task(args.id, args.status)
         if args.command == "configure":
             configure_interactive()
             return 0
