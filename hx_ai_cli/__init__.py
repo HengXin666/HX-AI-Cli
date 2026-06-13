@@ -1,0 +1,2 @@
+"""HX-AI-Cli package."""
+

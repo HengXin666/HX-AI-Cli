@@ -2,22 +2,22 @@
 
 `HX-AI-Cli` 是一个跨平台的交互式 AI CLI 启动器, 用来统一启动 `codex`、`claude`、`gemini`、`aider`、`opencode` 等命令行工具。
 
-它是一个单文件 uv 脚本:
+入口脚本用 uv 启动:
 
 ```sh
 uv run --script aiw.py launch
 ```
 
-脚本使用 PEP 723 元数据声明依赖, uv 会自动创建隔离环境并安装 `questionary` 和 `rich`。
+脚本使用 PEP 723 元数据声明依赖, uv 会自动创建隔离环境并安装 `questionary` 和 `rich`。核心代码放在 `hx_ai_cli/` 包里, `aiw.py` 只保留为薄入口。
 
 ## git worktree
 
 Git 内置的 `git worktree` 工作流处理。`git worktree` 可以让同一个仓库同时拥有多个工作目录。对 AI 任务来说, 它适合把每个独立任务放进单独目录和分支, 避免多个 agent 或多个任务互相改乱同一个工作区。
 
-新建独立任务时, 脚本会按这个模式创建工作树:
+新建独立任务时, 脚本默认把 worktree 创建在 HX-AI-Cli 的用户配置目录下, 不再写入当前仓库, 避免 `git add .` 把任务目录带进去。路径可以通过 `where` 查看, 也可以在配置菜单里修改:
 
 ```sh
-git worktree add -b ai/<任务名> .ai-worktrees/<任务名> HEAD
+uv run --script aiw.py where
 ```
 
 如果当前目录还不是 Git 仓库, 交互流程会询问是否执行 `git init`。如果仓库还没有任何提交, Git 不能创建 worktree, 脚本会提示改为直接在当前工作区启动。
@@ -30,7 +30,7 @@ git worktree add -b ai/<任务名> .ai-worktrees/<任务名> HEAD
 
 ## 功能
 
-- 单文件 uv 脚本: `uv run --script aiw.py`。
+- uv 入口脚本: `uv run --script aiw.py`。
 - 交互界面支持中文和英文。首次进入会选择语言, 之后可在配置菜单里修改。
 - 交互界面使用彩色文本, 高亮当前选择、成功状态和错误状态。
 - 自动识别常见 AI CLI: `codex`、`claude`、`cc`、`gemini`、`aider`、`opencode`。
@@ -39,7 +39,9 @@ git worktree add -b ai/<任务名> .ai-worktrees/<任务名> HEAD
 - 支持可配置启动命令、默认参数和自动驾驶参数。
 - 默认以自动驾驶模式启动: Codex 跳过确认和沙箱, Claude Code 跳过权限确认。
 - 支持基于 `tmux` 的任务续跑。
-- 支持基于 `git worktree` 的独立任务工作区。
+- 支持基于 `git worktree` 的独立任务工作区, 默认存放在用户配置目录, 不污染项目工作区。
+- 启动后先展示当前工作区的已保存任务和 tmux 状态。
+- 支持清空当前工作区任务, 同时结束 tmux session 并清理 worktree。
 - 支持一键写入 VS Code 自定义集成终端 profile。
 - 支持配置导入和导出。
 - 配置目录符合平台习惯:
@@ -62,7 +64,19 @@ uv run --script aiw.py where
 
 ## VS Code 一键自定义终端
 
-默认写入 VS Code 用户级 `settings.json`, 让任意工作区都可以使用这个终端 profile, 并和其它用户级 profile 显示在同一组:
+推荐使用安装脚本自动写入 VS Code 用户级 `settings.json`, 让任意工作区都可以使用这个终端 profile:
+
+```sh
+uv run --script install-vscode.py
+```
+
+如果确实希望同时设为默认终端, 显式加参数:
+
+```sh
+uv run --script install-vscode.py --set-default
+```
+
+高级配置仍可使用主入口:
 
 ```sh
 uv run --script aiw.py vscode
@@ -99,7 +113,7 @@ uv run --script aiw.py vscode --set-default
 uv run --script <aiw.py> launch --workspace ${workspaceFolder}
 ```
 
-工作区级配置会同时生成或刷新 `.ai-cli/ai-task.py`, VS Code profile 会指向这个工作区内脚本。用户级配置会指向当前这个 `aiw.py` 文件。
+默认推荐写入用户级配置, 不会在业务仓库里生成文件。只有显式选择工作区级配置时, 才会写入 `.vscode/settings.json` 和 `.ai-cli/ai-task.py`。
 
 终端 profile 名称为 `HX-AI-Cli`。VS Code 的动态终端标题由全局 `terminal.integrated.tabs.title` 控制; 为了不影响普通 zsh, 本工具不会改这个全局设置。
 
@@ -119,6 +133,7 @@ uv run --script aiw.py launch
 进入后可以选择:
 
 - 继续一个保存过的任务。
+- 清空当前工作区任务。
 - 新建独立任务。
 - 选择使用哪个 AI CLI。
 - 是否为新任务创建 Git worktree。
